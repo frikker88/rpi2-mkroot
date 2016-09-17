@@ -1,0 +1,76 @@
+#!/bin/bash
+set -e
+
+# Directory in which the root filesystem is contained
+#
+ROOTFS=$(pwd)/cb5-rootfs
+
+print_usage() {
+    cat 1>&2 <<EOF
+Usage: $0 rootfs-directory
+Start a shell in a root filesystem. Mounting and unmounting temporary driver filesystems
+is handled by this script.
+EOF
+}
+
+# Process options
+#
+while [ $# -gt 1 ]
+do
+    case "$1" in
+	--help|-h)
+	    print_usage
+	    exit 0
+	    ;;
+	*)
+	    echo "Unknown option '$1'" 1>&2
+	    exit 1
+    esac
+    shift
+done
+
+# Process last argument, the root file system location
+if [ -z "$1" ] || [ "$1" = -h ] || [ "$1" = --help ]; then
+    print_usage
+    exit 1
+fi
+if [ "$EUID" -ne 0 ]; then
+    echo "This must be run as root." 1>&2
+    exit 1
+fi
+export ROOTFS="$1"
+
+# Unmount and remove any temporary files
+#
+cleanup() {
+    set +e
+
+    # Identify and kill all processes still using files
+    echo "Killing processes using mount point" 1>&2
+    fuser -k "${ROOTFS}"
+    sleep 3
+    fuser -9 -k -v "${ROOTFS}"
+
+    # Clean up all temporary mount points
+    echo "Removing temporary mount points" 1>&2
+    umount -l "${ROOTFS}/proc" 2> /dev/null
+    umount -l "${ROOTFS}/sys" 2> /dev/null
+    umount -l "${ROOTFS}/dev/pts" 2> /dev/null
+    umount -l "${ROOTFS}/dev" 2> /dev/null
+    trap - 0 1 2 3 6
+}
+trap cleanup 0 1 2 3 6
+
+# Prepare filesystem to be chrooted
+#
+echo "Creating temporary system mount points in rootfs" 1>&2
+mount -t proc chproc "$ROOTFS/proc"
+mount -t sysfs chsys "$ROOTFS/sys"
+mount -t devtmpfs chdev "$ROOTFS/dev"
+mount -t devpts chpts "$ROOTFS/dev/pts"
+
+echo "Starting shell in rootfs" 1>&2
+LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive chroot ${ROOTFS}
+
+cleanup
+echo "Cleaned up"

@@ -1,0 +1,85 @@
+#!/bin/bash
+set -e
+
+print_usage() {
+    cat 1>&2 <<EOF
+Usage: $0 rootfs-directory image
+Package the contents of a directory into an ext4-based binary image file.
+EOF
+}
+
+# Process options
+#
+while [ $# -gt 2 ]
+do
+    case "$1" in
+	--help|-h)
+	    print_usage
+	    exit 0
+	    ;;
+	*)
+	    echo "Unknown option '$1'" 1>&2
+	    exit 1
+    esac
+    shift
+done
+
+# Process last argument, the root file system location
+if [ -z "$1" ] || [ -z "$2" ] || [ "$1" = -h ] || [ "$1" = --help ]; then
+    print_usage
+    exit 1
+fi
+if [ "$EUID" -ne 0 ]; then
+    echo "This must be run as root." 1>&2
+    exit 1
+fi
+
+# Directory to package
+rootfs="$1"
+
+# Binary image file
+image="$2"
+
+# Number of 512-byte sectors reserved at the beginning of the image
+# (usually 1M for e.g. a bootloader)
+table_sectors=$(expr 1 \* 1024 \* 1024 \/ 512)
+
+# Calculate size of the rootfs directory in KB
+rootfs_size=$(expr `du -s "${rootfs}" | awk '{ print $1 }'`)
+
+# The root partition is EXT4
+# This means more space than the actual used space of the rootfs is used.
+# As overhead for journaling and reserved blocks 25% are added.
+rootfs_sectors=$(expr $(expr ${rootfs_size} + ${rootfs_size} \/ 100 \* 25) \* 1024 \/ 512)
+
+# Calculate required image size in 512 Byte sectors
+image_sectors=$(expr ${table_sectors} + ${rootfs_sectors})
+
+# Initialize image file
+dd if=/dev/zero of="$image" bs=512 count=${table_sectors}
+dd if=/dev/zero of="$image" bs=512 count=0 seek=${image_sectors}
+
+# Write partition table
+sfdisk "$image" <<EOF
+${table_sectors},${rootfs_sectors},L,*
+EOF
+
+# Setup temporary loop devices
+image_loop="$(losetup -o 1M -f --show $image)"
+
+mkfs.ext4 -O^64bit "$image_loop"
+
+cleanup() {
+    losetup -d "$image_loop" 2> /dev/null
+    trap - 0 1 2 3 6
+}
+trap cleanup 0 1 2 3 6
+
+# Mount the temporary loop devices
+mount_dir=$(mktemp -d)
+mount "$image_loop" "$mount_dir"
+
+# Copy all files from the chroot to the loop device mount point directory
+rsync -a "$rootfs/" "$mount_dir"
+umount "$mount_dir"
+cleanup
