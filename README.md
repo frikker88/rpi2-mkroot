@@ -1,41 +1,46 @@
-A suite of utilities to build debian root filesystems and bootable images for the Cubieboard 5 (Cubietruck Plus).
+A suite of utilities to build a debian root filesystem and bootable image for the Raspberry Pi 2, model B.
 
 ## Utilities
 
-- `mkrootfs <dir>` Build a debian root filesystem in the given directory
-- `chrootfs <dir>` Start a shell in the given root filesystem.
-- `mkrootimg <dir> <img>` Bundle a root filesystem into a binary image that can be flashed to an sd card (bootloader still needs to be flashed manually).
+- `mkrootfs` Build a debian root filesystem in the given directory
+- `mkrootimg` Bundle a root filesystem into a bootable, binary image that can be flashed to an sd card.
 
-Run any of the above utilities with the `-h` or `--help` options for additional information.
+Run any of the above utilities without arguments for additional information.
 
 ## Usage Example
-The typical use-case, creating a bootable image for the Cubieboard 5 involves the following steps:
+The typical use-case, creating a bootable image involves the following steps:
 
 1. Create a root filesystem in a temporary directory "tmprootfs".
 
-		mkrootfs --hostname=cb5 --release=stretch --ssh-key=/home/user/.ssh/id_rsa.pub tmprootfs
-			
-2. (optional) Start a shell in the directory to install any additional packages.
+		mkrootfs --hostname=pi --release=stretch --ssh-key=/home/user/.ssh/id_rsa.pub tmprootfs
 
-		chrootfs tmprootfs
-		
-		root@inside_rootfs:~# apt install ... 
-		root@inside_rootfs:~# ...
-		root@inside_rootfs:~# exit
-		
-3. Pack the root filesystem into a binary image (note that the first 1MB of the image will be empty, reserved for a bootloader).
+2. Pack the root filesystem into a binary image
 
-		mkrootimg tmprootfs cb5-stretch.img
+		mkrootimg tmprootfs pi2-stretch.img
 
-4. Add bootloader to start of image (see http://linux-sunxi.org/Mainline_Debian_HowTo for instructions on how to build u-boot).
+3. Copy the image to an sd card.
+
+		dd if=pi2-stretch.img of=/dev/mmc0
+
+4. Boot a Raspberry Pi from the card.
+
+   Note that several initialization tasks are performed during the first boot:
+
+   - the root filesystem is expanded to fill the whole sd card
+   - ssh keys and machine ids are regenerated
+
+   Progress will be signaled through the ACT and PWR LEDs:
    
-		dd if=<u-boot>/u-boot-sunxi-with-spl.bin of=cb5-stretch.img bs=1024 seek=8 conv=notrunc
-		
-5. Copy the image to an sd card.
+   - both leds will flash rapidly for a couple of seconds, indicating
+     that first-boot tasks are about to start
+   - PWR will blink in a "heartbeat" pattern and ACT will indicate sd card activity
+   - first-boot tasks are run
+   - after completion, the ACT led will blink in a heartbeat pattern an PWR will be turned off
 
-		dd if=cb5-stretch.img of=/dev/mmc0
+## Requirements
 
-Note that you will need root privileges to run most of these commands.
+- qemu-user-static
+- qemu-debootstrap
 
 ## Copying
 This program is free software, released under the GNU General Public License version 2.

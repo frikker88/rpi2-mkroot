@@ -3,36 +3,19 @@ set -e
 
 print_usage() {
     cat 1>&2 <<EOF
-Usage: $0 rootfs-directory image
-Package the contents of a directory into an ext4-based binary image file.
+Usage: $0 <rootfs_directory> <image_file>
+Package the contents of a debian root filesystem into a binary image file, ready to be burned onto an sd card.
 EOF
 }
 
-# Process options
-#
-while [ $# -gt 2 ]
-do
-    case "$1" in
-	--help|-h)
-	    print_usage
-	    exit 0
-	    ;;
-	*)
-	    echo "Unknown option '$1'" 1>&2
-	    exit 1
-    esac
-    shift
-done
+fail() {
+    echo "$1" >&2
+    exit 1
+}
 
-# Process last argument, the root file system location
-if [ -z "$1" ] || [ -z "$2" ] || [ "$1" = -h ] || [ "$1" = --help ]; then
-    print_usage
-    exit 1
-fi
-if [ "$EUID" -ne 0 ]; then
-    echo "This must be run as root." 1>&2
-    exit 1
-fi
+log() {
+    echo "mkrootimg: $1" >&2
+}
 
 # Directory to package
 rootfs="$1"
@@ -40,46 +23,90 @@ rootfs="$1"
 # Binary image file
 image="$2"
 
-# Number of 512-byte sectors reserved at the beginning of the image
-# (usually 1M for e.g. a bootloader)
-table_sectors=$(expr 1 \* 1024 \* 1024 \/ 512)
+# Contains temporary build files
+builddir=$(mktemp -d)
 
-# Calculate size of the rootfs directory in KB
-rootfs_size=$(expr `du -s "${rootfs}" | awk '{ print $1 }'`)
+([ -n "$rootfs" ] && [ -n "$image" ]) || fail "$(print_usage)"
+[ -d "$rootfs" ] || fail "$rootfs does not exist or is not a directory"
+[ ! -e "$image" ] || fail "$image already exists"
 
-# The root partition is EXT4
-# This means more space than the actual used space of the rootfs is used.
-# As overhead for journaling and reserved blocks 25% are added.
-rootfs_sectors=$(expr $(expr ${rootfs_size} + ${rootfs_size} \/ 100 \* 25) \* 1024 \/ 512)
-
-# Calculate required image size in 512 Byte sectors
-image_sectors=$(expr ${table_sectors} + ${rootfs_sectors})
-
-# Initialize image file
-dd if=/dev/zero of="$image" bs=512 count=${table_sectors}
-dd if=/dev/zero of="$image" bs=512 count=0 seek=${image_sectors}
-
-# Write partition table
-sfdisk "$image" <<EOF
-${table_sectors},${rootfs_sectors},L,*
-EOF
-
-# Setup temporary loop devices
-image_loop="$(losetup -o 1M -f --show $image)"
-
-mkfs.ext4 -O^64bit "$image_loop"
+[ "$EUID" -eq 0 ] || fail "$0 must be run as root"
 
 cleanup() {
-    losetup -d "$image_loop" 2> /dev/null
+    set +e
+    umount --lazy "$builddir/mount/boot/firmware" 2> /dev/null
+    umount --lazy "$builddir/mount" 2> /dev/null
+    sync
+    losetup --detach "$bootfs_loop" 2> /dev/null
+    losetup --detach "$rootfs_loop" 2> /dev/null
+    rm -rf "$builddir"
     trap - 0 1 2 3 6
 }
 trap cleanup 0 1 2 3 6
 
-# Mount the temporary loop devices
-mount_dir=$(mktemp -d)
-mount "$image_loop" "$mount_dir"
+# Partition layout
+#
+# Content  Size
+# ---------------------------------------------
+# reserved 1024k       (1M, for e.g. a bootloader)
+# bootfs   100*1024k   (100M)
+# rootfs   as required
 
-# Copy all files from the chroot to the loop device mount point directory
-rsync -a "$rootfs/" "$mount_dir"
-umount "$mount_dir"
+# size in bytes
+reserved_size=1024*1024
+bootfs_size=$((100*1024*1024))
+rootfs_size=$(du --block-size=1 -s "$rootfs" | awk '{ print $1 }')
+
+# converted to 512-byte sectors
+reserved_sectors=$(( $reserved_size / 512 ))
+bootfs_sectors=$(( $bootfs_size / 512 ))
+# as overhead for journaling and reserved blocks 25% are added.
+rootfs_sectors=$(( ($rootfs_size + $rootfs_size * 25 / 100) / 512 ))
+image_sectors=$(( $reserved_sectors + $bootfs_sectors + $rootfs_sectors ))
+
+# create empty image file
+log "creating empty image"
+dd if=/dev/zero of="$image" bs=512 count="$image_sectors" status=none
+
+# write partition table to image
+log "partitioning image"
+sfdisk --label dos -q -uS "$image" <<EOF > /dev/null
+$reserved_sectors,$bootfs_sectors,c,*
+,$rootfs_sectors,L,
+EOF
+
+# set up temporary loop devices
+log "setting up image loop devices"
+bootfs_loop=$(losetup \
+		  --offset $(( $reserved_sectors * 512 )) \
+		  --sizelimit $(( $bootfs_sectors * 512 )) \
+		  --find \
+		  --show \
+		  "$image")
+rootfs_loop=$(losetup \
+		  --offset $(( ($reserved_sectors + $bootfs_sectors) * 512 )) \
+		  --sizelimit $(( $rootfs_sectors * 512 )) \
+		  --find \
+		  --show \
+		  "$image")
+
+# format partitions
+log "formatting partitions"
+mkfs.vfat -F 32 "$bootfs_loop" &> /dev/null
+mkfs.ext4 -O^64bit "$rootfs_loop" &> /dev/null
+
+# mount partitions
+log "mounting partitions"
+mkdir -p "$builddir/mount"
+mount "$rootfs_loop" "$builddir/mount"
+mkdir -p "$builddir/mount/boot/firmware"
+mount "$bootfs_loop" "$builddir/mount/boot/firmware"
+
+# copy root filesystem to image
+log "copying root filesystem"
+rsync -a "$rootfs/" "$builddir/mount/"
+
+log "cleaning up"
 cleanup
+
+log "done"
